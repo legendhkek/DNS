@@ -1,15 +1,13 @@
 /**
- * Single header - just include and use
+ * Game Config - Single header, encrypted communication
  * 
  * Usage:
  *   #include "GameConfig.h"
  *   
- *   // Set your server URL once
- *   gcfg_set_url("https://your-server.com/Dns.php");
+ *   gcfg_init("http://your-server.com/Dns.php");
  *   
- *   // Check if should block (returns true if ad/tracker)
  *   if (gcfg_block("doubleclick.net")) {
- *       // block this request
+ *       // block this
  *   }
  */
 
@@ -18,6 +16,8 @@
 
 #include <string>
 #include <cstring>
+#include <ctime>
+#include <cstdlib>
 #include <vector>
 #include <algorithm>
 
@@ -25,40 +25,127 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
+#define CLOSESOCK closesocket
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#define CLOSESOCK close
 #endif
 
-// ============ CONFIG ============
-static std::string g_server_url = "";
+namespace {
 
-// Blocked patterns (base64 decoded)
-static const char* g_patterns[] = {
-    "doubleclick", "googlesyndication", "googleadservices", "google-analytics",
-    "googletagmanager", "adservice", "pagead", "admob", "adsense", "adnxs",
-    "advertising", "mopub", "unityads", "applovin", "vungle", "chartboost",
-    "ironsrc", "inmobi", "tapjoy", "fyber", "an.facebook", "pixel.facebook",
-    "analytics", "tracker", "tracking", "telemetry", "mixpanel", "segment",
-    "amplitude", "branch.io", "adjust", "appsflyer", "kochava", "popads",
-    "popcash", "taboola", "outbrain", "crashlytics", "flurry", nullptr
+// ============ GLOBALS ============
+std::string g_url = "";
+std::string g_key = "";
+bool g_init = false;
+
+// Built-in patterns (obfuscated)
+const char* g_enc_patterns[] = {
+    "ZG91YmxlY2xpY2s=", "Z29vZ2xlc3luZGljYXRpb24=", "Z29vZ2xlYWRzZXJ2aWNlcw==",
+    "Z29vZ2xlLWFuYWx5dGljcw==", "Z29vZ2xldGFnbWFuYWdlcg==", "YWRzZXJ2aWNl",
+    "cGFnZWFk", "YWRtb2I=", "YWRzZW5zZQ==", "YWRueHM=", "YWR2ZXJ0aXNpbmc=",
+    "bW9wdWI=", "dW5pdHlhZHM=", "YXBwbG92aW4=", "dnVuZ2xl", "Y2hhcnRib29zdA==",
+    "aXJvbnNyYw==", "aW5tb2Jp", "dGFwam95", "ZnliZXI=", "YW4uZmFjZWJvb2s=",
+    "cGl4ZWwuZmFjZWJvb2s=", "YW5hbHl0aWNz", "dHJhY2tlcg==", "dHJhY2tpbmc=",
+    "dGVsZW1ldHJ5", "bWl4cGFuZWw=", "c2VnbWVudA==", "YW1wbGl0dWRl",
+    "YnJhbmNoLmlv", "YWRqdXN0", "YXBwc2ZseWVy", "a29jaGF2YQ==",
+    "cG9wYWRz", "cG9wY2FzaA==", "dGFib29sYQ==", "b3V0YnJhaW4=",
+    "Y3Jhc2hseXRpY3M=", "Zmx1cnJ5", nullptr
 };
 
-// ============ FUNCTIONS ============
+std::vector<std::string> g_patterns;
 
-// Set server URL
-inline void gcfg_set_url(const std::string& url) {
-    g_server_url = url;
-    if (!g_server_url.empty() && g_server_url.back() == '/') {
-        g_server_url.pop_back();
+// ============ BASE64 ============
+const char* B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+std::string b64enc(const std::string& s) {
+    std::string r;
+    int v = 0, b = -6;
+    for (unsigned char c : s) {
+        v = (v << 8) + c; b += 8;
+        while (b >= 0) { r += B64[(v >> b) & 0x3F]; b -= 6; }
     }
+    if (b > -6) r += B64[((v << 8) >> (b + 8)) & 0x3F];
+    while (r.size() % 4) r += '=';
+    return r;
 }
 
-// Normalize domain
-inline std::string gcfg_normalize(const std::string& s) {
+std::string b64dec(const std::string& s) {
+    std::string r;
+    std::vector<int> T(256, -1);
+    for (int i = 0; i < 64; i++) T[(int)B64[i]] = i;
+    int v = 0, b = -8;
+    for (char c : s) {
+        if (T[(int)(unsigned char)c] == -1) break;
+        v = (v << 6) + T[(int)(unsigned char)c];
+        b += 6;
+        if (b >= 0) { r += char((v >> b) & 0xFF); b -= 8; }
+    }
+    return r;
+}
+
+// ============ XOR CIPHER ============
+std::string xorCrypt(const std::string& data, const std::string& key) {
+    std::string r;
+    for (size_t i = 0; i < data.size(); i++) {
+        r += data[i] ^ key[i % key.size()];
+    }
+    return r;
+}
+
+// ============ ENCRYPT/DECRYPT ============
+std::string encryptData(const std::string& json, const std::string& key) {
+    std::string x = xorCrypt(json, key);
+    std::string b = b64enc(x);
+    // Add random padding
+    char pad[8];
+    for (int i = 0; i < 8; i++) pad[i] = 'a' + (rand() % 26);
+    std::string p(pad, 8);
+    return p + "." + b + "." + b.substr(0, 8);
+}
+
+std::string decryptData(const std::string& data, const std::string& key) {
+    // Find the base64 part between dots
+    size_t d1 = data.find('.');
+    size_t d2 = data.rfind('.');
+    if (d1 == std::string::npos || d1 == d2) return "";
+    
+    std::string b64 = data.substr(d1 + 1, d2 - d1 - 1);
+    std::string decoded = b64dec(b64);
+    return xorCrypt(decoded, key);
+}
+
+// ============ JSON HELPERS ============
+std::string jsonGetStr(const std::string& j, const std::string& k) {
+    std::string search = "\"" + k + "\":\"";
+    size_t p = j.find(search);
+    if (p == std::string::npos) {
+        search = "\"" + k + "\": \"";
+        p = j.find(search);
+    }
+    if (p == std::string::npos) return "";
+    p += search.size();
+    size_t e = j.find("\"", p);
+    return (e != std::string::npos) ? j.substr(p, e - p) : "";
+}
+
+int jsonGetInt(const std::string& j, const std::string& k) {
+    std::string search = "\"" + k + "\":";
+    size_t p = j.find(search);
+    if (p == std::string::npos) {
+        search = "\"" + k + "\": ";
+        p = j.find(search);
+    }
+    if (p == std::string::npos) return 0;
+    p += search.size();
+    while (p < j.size() && (j[p] == ' ' || j[p] == '\t')) p++;
+    return atoi(j.c_str() + p);
+}
+
+std::string normalize(const std::string& s) {
     std::string r = s;
     if (r.find("http://") == 0) r = r.substr(7);
     if (r.find("https://") == 0) r = r.substr(8);
@@ -68,56 +155,42 @@ inline std::string gcfg_normalize(const std::string& s) {
     return r;
 }
 
-// Local check (fast, no network) - checks against built-in patterns
-inline bool gcfg_block_local(const std::string& domain) {
-    std::string d = gcfg_normalize(domain);
-    for (int i = 0; g_patterns[i]; i++) {
-        if (d.find(g_patterns[i]) != std::string::npos) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// HTTP request helper
-inline std::string gcfg_http_get(const std::string& url) {
+// ============ HTTP ============
+std::string httpReq(const std::string& url, const std::string& body = "") {
     std::string result;
     
-    // Parse URL
-    bool use_ssl = (url.find("https://") == 0);
-    size_t start = use_ssl ? 8 : (url.find("http://") == 0 ? 7 : 0);
-    size_t path_start = url.find('/', start);
-    std::string host_port = (path_start != std::string::npos) ? url.substr(start, path_start - start) : url.substr(start);
-    std::string path = (path_start != std::string::npos) ? url.substr(path_start) : "/";
+    bool ssl = (url.find("https://") == 0);
+    size_t start = ssl ? 8 : (url.find("http://") == 0 ? 7 : 0);
+    size_t ps = url.find('/', start);
+    std::string hp = (ps != std::string::npos) ? url.substr(start, ps - start) : url.substr(start);
+    std::string path = (ps != std::string::npos) ? url.substr(ps) : "/";
     
-    std::string host = host_port;
-    int port = use_ssl ? 443 : 80;
-    size_t colon = host_port.find(':');
-    if (colon != std::string::npos) {
-        host = host_port.substr(0, colon);
-        port = std::stoi(host_port.substr(colon + 1));
+    std::string host = hp;
+    int port = ssl ? 443 : 80;
+    size_t cp = hp.find(':');
+    if (cp != std::string::npos) {
+        host = hp.substr(0, cp);
+        port = atoi(hp.c_str() + cp + 1);
     }
     
-    // Skip SSL for simplicity (use HTTP or handle SSL in your app)
-    if (use_ssl) return result;
+    if (ssl) return result; // Skip SSL for simplicity
     
     #ifdef _WIN32
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2,2), &wsa);
+    WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
     #endif
     
     struct addrinfo hints = {}, *addr = nullptr;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     
-    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &addr) != 0) {
-        return result;
-    }
+    char portStr[16];
+    snprintf(portStr, sizeof(portStr), "%d", port);
+    
+    if (getaddrinfo(host.c_str(), portStr, &hints, &addr) != 0) return result;
     
     int sock = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
     if (sock < 0) { freeaddrinfo(addr); return result; }
     
-    // Timeout
     #ifdef _WIN32
     DWORD tv = 5000;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, sizeof(tv));
@@ -127,91 +200,199 @@ inline std::string gcfg_http_get(const std::string& url) {
     #endif
     
     if (connect(sock, addr->ai_addr, addr->ai_addrlen) < 0) {
-        #ifdef _WIN32
-        closesocket(sock);
-        #else
-        close(sock);
-        #endif
-        freeaddrinfo(addr);
-        return result;
+        CLOSESOCK(sock); freeaddrinfo(addr); return result;
     }
     freeaddrinfo(addr);
     
-    // Send request
-    std::string req = "GET " + path + " HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n";
+    std::string req;
+    if (body.empty()) {
+        req = "GET " + path + " HTTP/1.1\r\n";
+    } else {
+        req = "POST " + path + " HTTP/1.1\r\n";
+        req += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+        req += "Content-Type: application/octet-stream\r\n";
+    }
+    req += "Host: " + host + "\r\n";
+    req += "User-Agent: UnityPlayer/2021.3.15f1\r\n";
+    req += "X-Unity-Version: 2021.3.15f1\r\n";
+    req += "Connection: close\r\n\r\n";
+    req += body;
+    
     send(sock, req.c_str(), req.size(), 0);
     
-    // Receive
+    std::string resp;
     char buf[4096];
     int n;
-    std::string resp;
     while ((n = recv(sock, buf, sizeof(buf)-1, 0)) > 0) {
         buf[n] = 0;
         resp += buf;
     }
     
+    CLOSESOCK(sock);
     #ifdef _WIN32
-    closesocket(sock);
     WSACleanup();
-    #else
-    close(sock);
     #endif
     
-    // Extract body
-    size_t body_start = resp.find("\r\n\r\n");
-    if (body_start != std::string::npos) {
-        result = resp.substr(body_start + 4);
+    size_t bodyStart = resp.find("\r\n\r\n");
+    if (bodyStart != std::string::npos) {
+        result = resp.substr(bodyStart + 4);
     }
     
     return result;
 }
 
-// Check with server (if URL set) or local
-inline bool gcfg_block(const std::string& domain) {
-    // Always check local first (fast)
-    if (gcfg_block_local(domain)) {
+// ============ INIT PATTERNS ============
+void initPatterns() {
+    if (!g_patterns.empty()) return;
+    for (int i = 0; g_enc_patterns[i]; i++) {
+        std::string dec = b64dec(g_enc_patterns[i]);
+        if (!dec.empty()) g_patterns.push_back(dec);
+    }
+}
+
+// ============ LOCAL CHECK ============
+bool checkLocal(const std::string& domain) {
+    initPatterns();
+    std::string d = normalize(domain);
+    for (const auto& p : g_patterns) {
+        if (d.find(p) != std::string::npos) return true;
+    }
+    return false;
+}
+
+// ============ EXTRACT CONFIG FROM FAKE GAME DATA ============
+std::string extractConfig(const std::string& response) {
+    // Find "config" field in the fake game data
+    std::string search = "\"config\":\"";
+    size_t p = response.find(search);
+    if (p == std::string::npos) {
+        search = "\"config\": \"";
+        p = response.find(search);
+    }
+    if (p == std::string::npos) return response; // Not wrapped
+    
+    p += search.size();
+    size_t e = response.find("\"", p);
+    if (e == std::string::npos) return "";
+    
+    return response.substr(p, e - p);
+}
+
+} // anonymous namespace
+
+// ============ PUBLIC API ============
+
+// Initialize with server URL
+inline bool gcfg_init(const std::string& url) {
+    g_url = url;
+    if (!g_url.empty() && g_url.back() == '/') g_url.pop_back();
+    
+    initPatterns();
+    srand(time(nullptr));
+    
+    // Get encryption key from server
+    std::string resp = httpReq(g_url + "/?a=i");
+    if (resp.empty()) {
+        g_init = true; // Use local only
         return true;
     }
     
-    // If server URL set, check remotely
-    if (!g_server_url.empty()) {
-        std::string url = g_server_url + "/k?d=" + gcfg_normalize(domain);
-        std::string resp = gcfg_http_get(url);
-        if (resp.find("\"r\":1") != std::string::npos) {
-            return true;
+    // Extract encrypted config
+    std::string config = extractConfig(resp);
+    
+    // Try to find key in response
+    std::string k = jsonGetStr(resp, "k");
+    if (k.empty()) {
+        // Try decrypting with time-based key
+        time_t now = time(nullptr);
+        struct tm* t = gmtime(&now);
+        char timeBuf[32];
+        strftime(timeBuf, sizeof(timeBuf), "%Y%m%d%H", t);
+        g_key = b64enc(std::string(timeBuf) + "gx");
+    } else {
+        g_key = k;
+    }
+    
+    // Try to decrypt config
+    if (!config.empty() && config.find('.') != std::string::npos) {
+        std::string dec = decryptData(config, g_key);
+        if (!dec.empty() && jsonGetInt(dec, "s") == 1) {
+            g_key = jsonGetStr(dec, "k");
+            if (g_key.empty()) g_key = k;
+        }
+    }
+    
+    g_init = true;
+    return true;
+}
+
+// Check if should block (local + server)
+inline bool gcfg_block(const std::string& domain) {
+    if (!g_init) gcfg_init(g_url);
+    
+    // Fast local check first
+    if (checkLocal(domain)) return true;
+    
+    // Server check if URL set
+    if (!g_url.empty() && !g_key.empty()) {
+        std::string d = normalize(domain);
+        std::string body = encryptData("{\"a\":\"k\",\"d\":\"" + d + "\"}", g_key);
+        std::string resp = httpReq(g_url, body);
+        
+        if (!resp.empty()) {
+            std::string config = extractConfig(resp);
+            std::string dec = decryptData(config, g_key);
+            if (!dec.empty()) {
+                if (jsonGetInt(dec, "f") == 1) return true;
+            }
         }
     }
     
     return false;
 }
 
-// Query and get IP (returns "0.0.0.0" if blocked)
+// Local check only (very fast, no network)
+inline bool gcfg_block_local(const std::string& domain) {
+    initPatterns();
+    return checkLocal(domain);
+}
+
+// Query with full response
 inline std::string gcfg_query(const std::string& domain) {
-    if (gcfg_block_local(domain)) {
-        return "0.0.0.0";
-    }
+    if (!g_init) gcfg_init(g_url);
     
-    if (!g_server_url.empty()) {
-        std::string url = g_server_url + "/q?d=" + gcfg_normalize(domain);
-        std::string resp = gcfg_http_get(url);
+    if (checkLocal(domain)) return "0.0.0.0";
+    
+    if (!g_url.empty() && !g_key.empty()) {
+        std::string d = normalize(domain);
+        std::string body = encryptData("{\"a\":\"q\",\"d\":\"" + d + "\"}", g_key);
+        std::string resp = httpReq(g_url, body);
         
-        // Check if blocked
-        if (resp.find("\"r\":1") != std::string::npos) {
-            return "0.0.0.0";
-        }
-        
-        // Extract IP
-        size_t ip_pos = resp.find("\"ip\":\"");
-        if (ip_pos != std::string::npos) {
-            ip_pos += 6;
-            size_t ip_end = resp.find("\"", ip_pos);
-            if (ip_end != std::string::npos) {
-                return resp.substr(ip_pos, ip_end - ip_pos);
+        if (!resp.empty()) {
+            std::string config = extractConfig(resp);
+            std::string dec = decryptData(config, g_key);
+            if (!dec.empty()) {
+                if (jsonGetInt(dec, "f") == 1) return "0.0.0.0";
+                std::string ip = jsonGetStr(dec, "v");
+                if (!ip.empty()) return ip;
             }
         }
     }
     
     return "";
+}
+
+// Add custom pattern to local filter
+inline void gcfg_add(const std::string& pattern) {
+    initPatterns();
+    std::string p = normalize(pattern);
+    if (!p.empty()) g_patterns.push_back(p);
+}
+
+// Set URL (alternative to init)
+inline void gcfg_set_url(const std::string& url) {
+    g_url = url;
+    if (!g_url.empty() && g_url.back() == '/') g_url.pop_back();
 }
 
 #endif // GAME_CONFIG_H

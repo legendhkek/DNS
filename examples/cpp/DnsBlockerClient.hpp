@@ -1,26 +1,19 @@
 /**
- * DNS Blocker API Client for C++17
- * 
- * A lightweight, self-contained HTTP client for DNS Blocker API
- * Designed for use as a library in Android APK via NDK/JNI
+ * Stealth DNS Client - C++17
  * 
  * Features:
- * - No external dependencies (uses system sockets)
- * - C++17 compatible
- * - Thread-safe design
- * - JNI ready for Android integration
- * - SSL/TLS support via OpenSSL (optional)
+ * - Encrypted communication (AES-256-GCM)
+ * - Obfuscated API calls
+ * - Binary protocol support
+ * - Anti-detection measures
+ * - Looks like normal cloud sync traffic
  * 
- * Build as library:
- *   g++ -std=c++17 -shared -fPIC -o libdnsblocker.so DnsBlockerClient.cpp -lssl -lcrypto -pthread
- * 
- * Build static:
- *   g++ -std=c++17 -c DnsBlockerClient.cpp -o DnsBlockerClient.o
- *   ar rcs libdnsblocker.a DnsBlockerClient.o
+ * Build:
+ *   g++ -std=c++17 -shared -fPIC -o libcloudsync.so DnsBlockerClient.cpp -lssl -lcrypto -pthread
  */
 
-#ifndef DNS_BLOCKER_CLIENT_HPP
-#define DNS_BLOCKER_CLIENT_HPP
+#ifndef CLOUD_SYNC_CLIENT_HPP
+#define CLOUD_SYNC_CLIENT_HPP
 
 #include <string>
 #include <string_view>
@@ -31,358 +24,262 @@
 #include <functional>
 #include <memory>
 #include <optional>
-#include <variant>
 #include <mutex>
+#include <shared_mutex>
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <random>
 
-namespace DnsBlocker {
+// Obfuscated namespace (looks like cloud service)
+namespace CloudSync {
 
-// Version info
-constexpr const char* VERSION = "2.0.0";
-constexpr int VERSION_MAJOR = 2;
-constexpr int VERSION_MINOR = 0;
-constexpr int VERSION_PATCH = 0;
+// Version (obfuscated)
+constexpr const char* LIB_VERSION = "3.2.1";
+constexpr int PROTOCOL_VERSION = 2;
 
-// Configuration constants
+// Timing constants
 constexpr int DEFAULT_TIMEOUT_MS = 10000;
-constexpr int DEFAULT_PORT_HTTP = 80;
-constexpr int DEFAULT_PORT_HTTPS = 443;
-constexpr size_t MAX_RESPONSE_SIZE = 1024 * 1024; // 1MB
-constexpr size_t MAX_DOMAINS_BULK = 50;
+constexpr size_t MAX_RESPONSE_SIZE = 1024 * 1024;
+constexpr size_t MAX_BATCH_SIZE = 50;
 
 /**
- * Error codes
+ * Result codes (generic names)
  */
-enum class ErrorCode {
+enum class ResultCode {
     OK = 0,
-    CONNECTION_FAILED,
+    CONN_ERROR,
     TIMEOUT,
-    SSL_ERROR,
-    INVALID_RESPONSE,
-    UNAUTHORIZED,
-    RATE_LIMITED,
-    INVALID_DOMAIN,
-    NETWORK_ERROR,
+    CRYPTO_ERROR,
+    INVALID_DATA,
+    AUTH_FAILED,
+    LIMIT_EXCEEDED,
+    INVALID_INPUT,
+    NET_ERROR,
     PARSE_ERROR,
-    UNKNOWN_ERROR
+    UNKNOWN
 };
 
-/**
- * Convert error code to string
- */
-[[nodiscard]] const char* errorCodeToString(ErrorCode code) noexcept;
+[[nodiscard]] const char* getResultMessage(ResultCode code) noexcept;
 
 /**
- * DNS Resolution result
+ * Query result (obfuscated field names)
  */
-struct ResolveResult {
-    std::string domain;
-    std::string ipv4;
-    std::string ipv6;
-    bool blocked = false;
-    bool success = false;
+struct QueryResult {
+    std::string target;      // domain
+    std::string addr;        // ipv4
+    std::string addr6;       // ipv6
+    int flag = 0;            // 0=allow, 1=block
+    bool valid = false;
     int ttl = 300;
-    std::string reason;
-    ErrorCode errorCode = ErrorCode::OK;
     
-    [[nodiscard]] bool isBlocked() const noexcept { return blocked; }
-    [[nodiscard]] bool isValid() const noexcept { return success; }
-    [[nodiscard]] const std::string& getIP() const noexcept { return ipv4; }
+    [[nodiscard]] bool isFiltered() const noexcept { return flag == 1; }
+    [[nodiscard]] bool isOk() const noexcept { return valid; }
 };
 
 /**
- * API Status
+ * Service status
  */
-struct ApiStatus {
-    bool online = false;
-    std::string version;
-    int blockedDomainsCount = 0;
-    std::string serverTime;
-    std::string uptime;
-    
-    [[nodiscard]] bool isOnline() const noexcept { return online; }
+struct ServiceStatus {
+    bool active = false;
+    std::string ver;
+    int dataCount = 0;
+    int64_t timestamp = 0;
 };
 
 /**
- * Connection info
+ * Session info
  */
-struct ConnectionInfo {
-    bool success = false;
-    std::string clientIp;
-    int64_t serverTime = 0;
-    int blockedDomainsCount = 0;
-    std::string message;
+struct SessionInfo {
+    bool ok = false;
+    std::string token;
+    std::string clientId;
+    int64_t timestamp = 0;
+    int dataCount = 0;
     std::string error;
-    ErrorCode errorCode = ErrorCode::OK;
-    
-    [[nodiscard]] bool isConnected() const noexcept { return success; }
-};
-
-/**
- * HTTP Response
- */
-struct HttpResponse {
-    int statusCode = 0;
-    std::string body;
-    std::map<std::string, std::string> headers;
-    ErrorCode errorCode = ErrorCode::OK;
-    std::string errorMessage;
-    
-    [[nodiscard]] bool isSuccess() const noexcept { 
-        return statusCode >= 200 && statusCode < 300; 
-    }
+    ResultCode code = ResultCode::OK;
 };
 
 /**
  * Client configuration
  */
 struct ClientConfig {
-    std::string serverUrl;
-    std::string apiKey;
+    std::string endpoint;        // server URL
+    std::string secret;          // encryption key
     int timeoutMs = DEFAULT_TIMEOUT_MS;
-    bool useSSL = true;
-    bool verifyCert = true;
-    int maxRetries = 3;
-    int retryDelayMs = 1000;
-    bool enableCache = true;
-    int cacheTtlSeconds = 300;
+    bool useEncryption = true;
+    bool useBinaryProtocol = false;
+    bool enableLocalCache = true;
+    int cacheTtlSec = 300;
     
-    // Local blocklist for offline/fast blocking
-    std::vector<std::string> localBlocklist;
+    // Stealth options
+    bool randomizeHeaders = true;
+    bool randomizeEndpoints = true;
+    int requestJitterMs = 0;     // Random delay 0-N ms
 };
 
-/**
- * Async callback types
- */
-using ConnectCallback = std::function<void(const ConnectionInfo&)>;
-using ResolveCallback = std::function<void(const ResolveResult&)>;
-using StatusCallback = std::function<void(const ApiStatus&)>;
-using BlocklistCallback = std::function<void(const std::vector<std::string>&)>;
+// Callback types
+using SessionCallback = std::function<void(const SessionInfo&)>;
+using QueryCallback = std::function<void(const QueryResult&)>;
+using StatusCallback = std::function<void(const ServiceStatus&)>;
 
 /**
- * DNS Blocker API Client
+ * Cloud Sync Client (Stealth DNS Blocker)
  * 
- * Thread-safe client for DNS blocking API
+ * All method and class names are obfuscated to look like
+ * a generic cloud synchronization service.
  */
-class Client {
+class SyncClient {
 public:
     /**
-     * Constructor with URL and API key
+     * Create client with endpoint and secret key
      */
-    explicit Client(std::string_view serverUrl, std::string_view apiKey);
+    explicit SyncClient(std::string_view endpoint, std::string_view secret);
     
     /**
-     * Constructor with config
+     * Create client with config
      */
-    explicit Client(const ClientConfig& config);
+    explicit SyncClient(const ClientConfig& config);
+    
+    ~SyncClient();
+    
+    // No copy
+    SyncClient(const SyncClient&) = delete;
+    SyncClient& operator=(const SyncClient&) = delete;
+    
+    // Move OK
+    SyncClient(SyncClient&&) noexcept;
+    SyncClient& operator=(SyncClient&&) noexcept;
+    
+    // ==================== Core API ====================
     
     /**
-     * Destructor
+     * Initialize session (connect)
      */
-    ~Client();
-    
-    // Disable copy
-    Client(const Client&) = delete;
-    Client& operator=(const Client&) = delete;
-    
-    // Enable move
-    Client(Client&&) noexcept;
-    Client& operator=(Client&&) noexcept;
-    
-    // ==================== Synchronous API ====================
+    [[nodiscard]] SessionInfo initSession();
     
     /**
-     * Connect to DNS Blocker API
+     * Query single item (resolve domain)
      */
-    [[nodiscard]] ConnectionInfo connect();
+    [[nodiscard]] QueryResult query(std::string_view item);
     
     /**
-     * Resolve a domain with ad blocking
+     * Quick check if item is filtered (blocked)
      */
-    [[nodiscard]] ResolveResult resolve(std::string_view domain);
+    [[nodiscard]] bool isFiltered(std::string_view item);
     
     /**
-     * Check if a domain is blocked (fast local + remote check)
+     * Batch query multiple items
      */
-    [[nodiscard]] bool isBlocked(std::string_view domain);
+    [[nodiscard]] std::map<std::string, QueryResult> queryBatch(
+        const std::vector<std::string>& items);
     
     /**
-     * Resolve multiple domains at once
+     * Get service status
      */
-    [[nodiscard]] std::map<std::string, ResolveResult> bulkResolve(
-        const std::vector<std::string>& domains);
+    [[nodiscard]] ServiceStatus getStatus();
     
     /**
-     * Get API status
+     * Sync filter data from server
      */
-    [[nodiscard]] ApiStatus getStatus();
+    [[nodiscard]] std::vector<std::string> syncData();
+    
+    // ==================== Async API ====================
+    
+    std::future<SessionInfo> initSessionAsync();
+    std::future<QueryResult> queryAsync(std::string_view item);
+    void initSessionAsync(SessionCallback callback);
+    void queryAsync(std::string_view item, QueryCallback callback);
+    
+    // ==================== Local Filter ====================
     
     /**
-     * Get blocklist from server
+     * Check local filter only (very fast, no network)
      */
-    [[nodiscard]] std::vector<std::string> getBlocklist();
+    [[nodiscard]] bool checkLocal(std::string_view item) const;
     
     /**
-     * Add domains to remote blocklist
+     * Add item to local filter
      */
-    bool addToBlocklist(const std::vector<std::string>& domains);
+    void addLocalFilter(std::string_view item);
     
     /**
-     * Remove domains from remote blocklist
+     * Remove item from local filter
      */
-    bool removeFromBlocklist(const std::vector<std::string>& domains);
-    
-    // ==================== Asynchronous API ====================
+    void removeLocalFilter(std::string_view item);
     
     /**
-     * Async connect
+     * Load filter from file
      */
-    std::future<ConnectionInfo> connectAsync();
+    bool loadFilterFile(std::string_view path);
     
     /**
-     * Async resolve
+     * Save filter to file
      */
-    std::future<ResolveResult> resolveAsync(std::string_view domain);
+    bool saveFilterFile(std::string_view path) const;
     
     /**
-     * Async with callback
+     * Get local filter list
      */
-    void connectAsync(ConnectCallback callback);
-    void resolveAsync(std::string_view domain, ResolveCallback callback);
-    void getStatusAsync(StatusCallback callback);
-    
-    // ==================== Local Blocklist ====================
+    [[nodiscard]] std::vector<std::string> getLocalFilter() const;
     
     /**
-     * Add domain to local blocklist (instant blocking, no network)
+     * Clear local filter
      */
-    void addLocalBlock(std::string_view domain);
-    
-    /**
-     * Remove domain from local blocklist
-     */
-    void removeLocalBlock(std::string_view domain);
-    
-    /**
-     * Check if domain is in local blocklist
-     */
-    [[nodiscard]] bool isLocallyBlocked(std::string_view domain) const;
-    
-    /**
-     * Load local blocklist from file
-     */
-    bool loadLocalBlocklist(std::string_view filepath);
-    
-    /**
-     * Save local blocklist to file
-     */
-    bool saveLocalBlocklist(std::string_view filepath) const;
-    
-    /**
-     * Get local blocklist
-     */
-    [[nodiscard]] std::vector<std::string> getLocalBlocklist() const;
-    
-    /**
-     * Clear local blocklist
-     */
-    void clearLocalBlocklist();
+    void clearLocalFilter();
     
     // ==================== Configuration ====================
     
-    /**
-     * Set connection timeout
-     */
-    void setTimeout(int timeoutMs);
-    
-    /**
-     * Get connection timeout
-     */
+    void setTimeout(int ms);
     [[nodiscard]] int getTimeout() const;
-    
-    /**
-     * Enable/disable response caching
-     */
     void setCacheEnabled(bool enabled);
-    
-    /**
-     * Clear response cache
-     */
     void clearCache();
-    
-    /**
-     * Get last error message
-     */
     [[nodiscard]] std::string getLastError() const;
-    
-    /**
-     * Get last error code
-     */
-    [[nodiscard]] ErrorCode getLastErrorCode() const;
-    
-    /**
-     * Check if connected
-     */
-    [[nodiscard]] bool isConnected() const;
-    
-    /**
-     * Get client configuration
-     */
+    [[nodiscard]] ResultCode getLastResultCode() const;
+    [[nodiscard]] bool isSessionActive() const;
     [[nodiscard]] const ClientConfig& getConfig() const;
+    [[nodiscard]] std::string getSessionToken() const;
 
 private:
     class Impl;
-    std::unique_ptr<Impl> pImpl;
+    std::unique_ptr<Impl> m_impl;
 };
 
-// ==================== Utility Functions ====================
+// ==================== Utility ====================
 
-/**
- * Validate domain format
- */
-[[nodiscard]] bool isValidDomain(std::string_view domain);
+[[nodiscard]] bool isValidTarget(std::string_view item);
+[[nodiscard]] std::string normalizeTarget(std::string_view item);
+[[nodiscard]] bool isNullAddress(std::string_view addr);
+[[nodiscard]] std::vector<std::string> getBuiltinFilters();
 
-/**
- * Normalize domain (lowercase, trim, remove protocol)
- */
-[[nodiscard]] std::string normalizeDomain(std::string_view domain);
+} // namespace CloudSync
 
-/**
- * Check if IP is a blocked response (0.0.0.0, ::, etc.)
- */
-[[nodiscard]] bool isBlockedIP(std::string_view ip);
-
-/**
- * Get default ad blocklist
- */
-[[nodiscard]] std::vector<std::string> getDefaultBlocklist();
-
-} // namespace DnsBlocker
-
-// ==================== C API for JNI/FFI ====================
+// ==================== C API (for JNI/FFI) ====================
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Opaque handle
-typedef void* DnsBlockerHandle;
+typedef void* CSyncHandle;
 
-// C API functions
-DnsBlockerHandle dns_blocker_create(const char* server_url, const char* api_key);
-void dns_blocker_destroy(DnsBlockerHandle handle);
-int dns_blocker_connect(DnsBlockerHandle handle);
-int dns_blocker_is_blocked(DnsBlockerHandle handle, const char* domain);
-const char* dns_blocker_resolve(DnsBlockerHandle handle, const char* domain);
-const char* dns_blocker_get_error(DnsBlockerHandle handle);
-void dns_blocker_set_timeout(DnsBlockerHandle handle, int timeout_ms);
-void dns_blocker_add_local_block(DnsBlockerHandle handle, const char* domain);
-void dns_blocker_remove_local_block(DnsBlockerHandle handle, const char* domain);
+CSyncHandle csync_create(const char* endpoint, const char* secret);
+void csync_destroy(CSyncHandle h);
+int csync_init(CSyncHandle h);
+int csync_check(CSyncHandle h, const char* item);
+const char* csync_query(CSyncHandle h, const char* item);
+const char* csync_error(CSyncHandle h);
+void csync_timeout(CSyncHandle h, int ms);
+void csync_add_filter(CSyncHandle h, const char* item);
+void csync_remove_filter(CSyncHandle h, const char* item);
+int csync_check_local(CSyncHandle h, const char* item);
+const char* csync_token(CSyncHandle h);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // DNS_BLOCKER_CLIENT_HPP
+// Backward compatibility aliases
+namespace DnsBlocker = CloudSync;
+using DnsBlockerClient = CloudSync::SyncClient;
+
+#endif // CLOUD_SYNC_CLIENT_HPP

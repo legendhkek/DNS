@@ -1,285 +1,110 @@
 /**
- * Stealth DNS Client - C++17
- * 
- * Features:
- * - Encrypted communication (AES-256-GCM)
- * - Obfuscated API calls
- * - Binary protocol support
- * - Anti-detection measures
- * - Looks like normal cloud sync traffic
- * 
- * Build:
- *   g++ -std=c++17 -shared -fPIC -o libcloudsync.so DnsBlockerClient.cpp -lssl -lcrypto -pthread
+ * Game Config Manager
+ * Lightweight data sync module
  */
 
-#ifndef CLOUD_SYNC_CLIENT_HPP
-#define CLOUD_SYNC_CLIENT_HPP
+#ifndef GAME_CONFIG_MGR_HPP
+#define GAME_CONFIG_MGR_HPP
 
 #include <string>
-#include <string_view>
 #include <vector>
 #include <map>
-#include <unordered_map>
 #include <unordered_set>
-#include <functional>
 #include <memory>
-#include <optional>
 #include <mutex>
-#include <shared_mutex>
-#include <atomic>
-#include <chrono>
+#include <functional>
 #include <future>
-#include <random>
 
-// Obfuscated namespace (looks like cloud service)
-namespace CloudSync {
+namespace GameConfig {
 
-// Version (obfuscated)
-constexpr const char* LIB_VERSION = "3.2.1";
-constexpr int PROTOCOL_VERSION = 2;
-
-// Timing constants
-constexpr int DEFAULT_TIMEOUT_MS = 10000;
-constexpr size_t MAX_RESPONSE_SIZE = 1024 * 1024;
-constexpr size_t MAX_BATCH_SIZE = 50;
-
-/**
- * Result codes (generic names)
- */
-enum class ResultCode {
-    OK = 0,
-    CONN_ERROR,
-    TIMEOUT,
-    CRYPTO_ERROR,
-    INVALID_DATA,
-    AUTH_FAILED,
-    LIMIT_EXCEEDED,
-    INVALID_INPUT,
-    NET_ERROR,
-    PARSE_ERROR,
-    UNKNOWN
-};
-
-[[nodiscard]] const char* getResultMessage(ResultCode code) noexcept;
-
-/**
- * Query result (obfuscated field names)
- */
-struct QueryResult {
-    std::string target;      // domain
-    std::string addr;        // ipv4
-    std::string addr6;       // ipv6
-    int flag = 0;            // 0=allow, 1=block
+// Result structure
+struct DataResult {
+    std::string key;
+    std::string value;
+    int status = 0;  // 0=ok, 1=filtered
     bool valid = false;
-    int ttl = 300;
-    
-    [[nodiscard]] bool isFiltered() const noexcept { return flag == 1; }
-    [[nodiscard]] bool isOk() const noexcept { return valid; }
 };
 
-/**
- * Service status
- */
-struct ServiceStatus {
+// Session info
+struct SessionData {
     bool active = false;
-    std::string ver;
-    int dataCount = 0;
     int64_t timestamp = 0;
+    int count = 0;
 };
 
-/**
- * Session info
- */
-struct SessionInfo {
-    bool ok = false;
-    std::string token;
-    std::string clientId;
-    int64_t timestamp = 0;
-    int dataCount = 0;
-    std::string error;
-    ResultCode code = ResultCode::OK;
-};
+// Callback
+using ResultCallback = std::function<void(const DataResult&)>;
 
 /**
- * Client configuration
+ * Config Manager - handles data sync
  */
-struct ClientConfig {
-    std::string endpoint;        // server URL
-    std::string secret;          // encryption key
-    int timeoutMs = DEFAULT_TIMEOUT_MS;
-    bool useEncryption = true;
-    bool useBinaryProtocol = false;
-    bool enableLocalCache = true;
-    int cacheTtlSec = 300;
-    
-    // Stealth options
-    bool randomizeHeaders = true;
-    bool randomizeEndpoints = true;
-    int requestJitterMs = 0;     // Random delay 0-N ms
-};
-
-// Callback types
-using SessionCallback = std::function<void(const SessionInfo&)>;
-using QueryCallback = std::function<void(const QueryResult&)>;
-using StatusCallback = std::function<void(const ServiceStatus&)>;
-
-/**
- * Cloud Sync Client (Stealth DNS Blocker)
- * 
- * All method and class names are obfuscated to look like
- * a generic cloud synchronization service.
- */
-class SyncClient {
+class ConfigMgr {
 public:
-    /**
-     * Create client with endpoint and secret key
-     */
-    explicit SyncClient(std::string_view endpoint, std::string_view secret);
-    
-    /**
-     * Create client with config
-     */
-    explicit SyncClient(const ClientConfig& config);
-    
-    ~SyncClient();
+    // Create with server endpoint
+    explicit ConfigMgr(const std::string& endpoint);
+    ~ConfigMgr();
     
     // No copy
-    SyncClient(const SyncClient&) = delete;
-    SyncClient& operator=(const SyncClient&) = delete;
+    ConfigMgr(const ConfigMgr&) = delete;
+    ConfigMgr& operator=(const ConfigMgr&) = delete;
     
-    // Move OK
-    SyncClient(SyncClient&&) noexcept;
-    SyncClient& operator=(SyncClient&&) noexcept;
+    // Connect to server
+    bool init();
     
-    // ==================== Core API ====================
+    // Check if key is filtered
+    bool check(const std::string& key);
     
-    /**
-     * Initialize session (connect)
-     */
-    [[nodiscard]] SessionInfo initSession();
+    // Query key
+    DataResult query(const std::string& key);
     
-    /**
-     * Query single item (resolve domain)
-     */
-    [[nodiscard]] QueryResult query(std::string_view item);
+    // Batch query
+    std::map<std::string, DataResult> queryBatch(const std::vector<std::string>& keys);
     
-    /**
-     * Quick check if item is filtered (blocked)
-     */
-    [[nodiscard]] bool isFiltered(std::string_view item);
+    // Local check (fast, no network)
+    bool checkLocal(const std::string& key) const;
     
-    /**
-     * Batch query multiple items
-     */
-    [[nodiscard]] std::map<std::string, QueryResult> queryBatch(
-        const std::vector<std::string>& items);
+    // Add to local filter
+    void addFilter(const std::string& key);
     
-    /**
-     * Get service status
-     */
-    [[nodiscard]] ServiceStatus getStatus();
+    // Remove from local filter  
+    void removeFilter(const std::string& key);
     
-    /**
-     * Sync filter data from server
-     */
-    [[nodiscard]] std::vector<std::string> syncData();
+    // Async query
+    void queryAsync(const std::string& key, ResultCallback cb);
+    std::future<DataResult> queryFuture(const std::string& key);
     
-    // ==================== Async API ====================
-    
-    std::future<SessionInfo> initSessionAsync();
-    std::future<QueryResult> queryAsync(std::string_view item);
-    void initSessionAsync(SessionCallback callback);
-    void queryAsync(std::string_view item, QueryCallback callback);
-    
-    // ==================== Local Filter ====================
-    
-    /**
-     * Check local filter only (very fast, no network)
-     */
-    [[nodiscard]] bool checkLocal(std::string_view item) const;
-    
-    /**
-     * Add item to local filter
-     */
-    void addLocalFilter(std::string_view item);
-    
-    /**
-     * Remove item from local filter
-     */
-    void removeLocalFilter(std::string_view item);
-    
-    /**
-     * Load filter from file
-     */
-    bool loadFilterFile(std::string_view path);
-    
-    /**
-     * Save filter to file
-     */
-    bool saveFilterFile(std::string_view path) const;
-    
-    /**
-     * Get local filter list
-     */
-    [[nodiscard]] std::vector<std::string> getLocalFilter() const;
-    
-    /**
-     * Clear local filter
-     */
-    void clearLocalFilter();
-    
-    // ==================== Configuration ====================
-    
+    // Settings
     void setTimeout(int ms);
-    [[nodiscard]] int getTimeout() const;
-    void setCacheEnabled(bool enabled);
-    void clearCache();
-    [[nodiscard]] std::string getLastError() const;
-    [[nodiscard]] ResultCode getLastResultCode() const;
-    [[nodiscard]] bool isSessionActive() const;
-    [[nodiscard]] const ClientConfig& getConfig() const;
-    [[nodiscard]] std::string getSessionToken() const;
+    bool isActive() const;
+    std::string getError() const;
 
 private:
     class Impl;
-    std::unique_ptr<Impl> m_impl;
+    std::unique_ptr<Impl> m;
 };
 
-// ==================== Utility ====================
+// Helper functions
+std::string normalize(const std::string& s);
+bool isFiltered(const std::string& s);
 
-[[nodiscard]] bool isValidTarget(std::string_view item);
-[[nodiscard]] std::string normalizeTarget(std::string_view item);
-[[nodiscard]] bool isNullAddress(std::string_view addr);
-[[nodiscard]] std::vector<std::string> getBuiltinFilters();
+} // namespace GameConfig
 
-} // namespace CloudSync
-
-// ==================== C API (for JNI/FFI) ====================
-
+// C API
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef void* CSyncHandle;
-
-CSyncHandle csync_create(const char* endpoint, const char* secret);
-void csync_destroy(CSyncHandle h);
-int csync_init(CSyncHandle h);
-int csync_check(CSyncHandle h, const char* item);
-const char* csync_query(CSyncHandle h, const char* item);
-const char* csync_error(CSyncHandle h);
-void csync_timeout(CSyncHandle h, int ms);
-void csync_add_filter(CSyncHandle h, const char* item);
-void csync_remove_filter(CSyncHandle h, const char* item);
-int csync_check_local(CSyncHandle h, const char* item);
-const char* csync_token(CSyncHandle h);
+void* gcfg_create(const char* url);
+void gcfg_destroy(void* h);
+int gcfg_init(void* h);
+int gcfg_check(void* h, const char* key);
+const char* gcfg_query(void* h, const char* key);
+int gcfg_check_local(void* h, const char* key);
+void gcfg_add(void* h, const char* key);
+void gcfg_timeout(void* h, int ms);
 
 #ifdef __cplusplus
 }
 #endif
 
-// Backward compatibility aliases
-namespace DnsBlocker = CloudSync;
-using DnsBlockerClient = CloudSync::SyncClient;
-
-#endif // CLOUD_SYNC_CLIENT_HPP
+#endif

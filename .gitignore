@@ -1,0 +1,18 @@
+# Libraries
+*.so
+*.dll
+*.protected
+*.dylib
+
+# Uploaded files
+libs/*
+!libs/.gitkeep
+
+# PHP
+*.log
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
